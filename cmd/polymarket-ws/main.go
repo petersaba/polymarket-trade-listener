@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"polymarket-ws-listener/internal/api"
-	"polymarket-ws-listener/internal/poller"
+	"polymarket-ws-listener/internal/onchain"
 	"polymarket-ws-listener/internal/ws"
 )
 
@@ -34,6 +34,7 @@ func main() {
 
 	var assetIds []string
 	var conditionIds []string
+	knownTokens := make(map[string]string)
 
 	if *tokens != "" {
 		assetIds = strings.Split(*tokens, ",")
@@ -54,7 +55,58 @@ func main() {
 
 			var outcomes []string
 			json.Unmarshal([]byte(m.Outcomes), &outcomes)
+
+			for i, id := range marketIds {
+				if i < len(outcomes) {
+					knownTokens[id] = fmt.Sprintf("%s - %s", m.Question, outcomes[i])
+				}
+			}
+
 			fmt.Printf("  Market: %s | Outcomes: %v\n", m.Question, outcomes)
+		}
+	} else if *slug == "" && *tokens == "" {
+		fmt.Println("No specific token or slug requested. Pre-loading Active Markets (up to 15,000) for global name resolution...")
+		markets, err := api.FetchTopMarkets(15000)
+		if err != nil {
+			log.Printf("WARN: Failed to fetch top markets: %v\n", err)
+		} else {
+			for _, m := range markets {
+				var marketIds []string
+				if err := json.Unmarshal([]byte(m.ClobTokenIds), &marketIds); err != nil {
+					continue
+				}
+				var outcomes []string
+				json.Unmarshal([]byte(m.Outcomes), &outcomes)
+
+				for i, id := range marketIds {
+					if i < len(outcomes) {
+						knownTokens[id] = fmt.Sprintf("%s - %s", m.Question, outcomes[i])
+					}
+				}
+			}
+			fmt.Printf("Successfully loaded names for %d active top tokens.\n", len(knownTokens))
+		}
+
+		fmt.Println("Pre-loading 500 Newest Markets (for fast-resolving markets like btc-updown)...")
+		newMarkets, err := api.FetchNewestMarkets(500)
+		if err != nil {
+			log.Printf("WARN: Failed to fetch newest markets: %v\n", err)
+		} else {
+			for _, m := range newMarkets {
+				var marketIds []string
+				if err := json.Unmarshal([]byte(m.ClobTokenIds), &marketIds); err != nil {
+					continue
+				}
+				var outcomes []string
+				json.Unmarshal([]byte(m.Outcomes), &outcomes)
+
+				for i, id := range marketIds {
+					if i < len(outcomes) {
+						knownTokens[id] = fmt.Sprintf("%s - %s", m.Question, outcomes[i])
+					}
+				}
+			}
+			fmt.Printf("Successfully loaded new token cache, total tracked: %d.\n", len(knownTokens))
 		}
 	} else if *account == "" {
 		fmt.Println("Usage:")
@@ -100,11 +152,11 @@ func main() {
 
 	done := make(chan struct{})
 
-	// ── Trade poller (Data API) ──
-	go poller.PollTrades(assetIds, *account, done)
+	// ── Trade listener (Polygon EVM) ──
+	go onchain.ListenOnchain(assetIds, *account, done, knownTokens)
 
 	if suppressWS {
-		// Just wait for interrupt, trades are polled above
+		// Just wait for interrupt, trades are streamed from the blockchain above
 		<-interrupt
 		close(done)
 		log.Println("Shutting down...")

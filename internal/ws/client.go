@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"time"
 
 	"polymarket-ws-listener/internal/display"
@@ -18,16 +19,21 @@ func ListenWS(assetIds []string, conditionIds []string, done chan struct{}) {
 		return
 	}
 
-	c, _, err := websocket.DefaultDialer.Dial(WSEndpoint, nil)
+	// Use headers to mimic a browser, often required to avoid 403/bad handshake
+	header := http.Header{}
+	header.Add("Origin", "https://polymarket.com")
+	header.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+	c, _, err := websocket.DefaultDialer.Dial(WSEndpoint, header)
 	if err != nil {
 		log.Fatalf("WebSocket connection error: %v", err)
 	}
 	defer c.Close()
 
-	// Build subscription message
+	// Build subscription message for CLOB market data
 	subMsg := map[string]interface{}{
-		"assets_ids": assetIds,
-		"type":       "market",
+		"assets": assetIds,
+		"type":   "market",
 	}
 
 	if err := c.WriteJSON(subMsg); err != nil {
@@ -42,12 +48,12 @@ func ListenWS(assetIds []string, conditionIds []string, done chan struct{}) {
 
 	// Heartbeat goroutine
 	go func() {
-		ticker := time.NewTicker(10 * time.Second)
+		ticker := time.NewTicker(20 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				if err := c.WriteMessage(websocket.TextMessage, []byte(`{"type":"ping"}`)); err != nil {
+				if err := c.WriteMessage(websocket.TextMessage, []byte(`ping`)); err != nil {
 					return
 				}
 			case <-done:
@@ -92,6 +98,24 @@ func handleWSEvent(raw map[string]interface{}) {
 	msgType, _ := raw["event_type"].(string)
 	if msgType == "" {
 		msgType, _ = raw["type"].(string)
+	}
+	if msgType == "" {
+		msgType, _ = raw["topic"].(string)
+	}
+	if msgType == "" {
+		msgType = "unknown"
+	}
+
+	// For clob_market topic, the actual event is often in a nested 'data' field
+	if msgType == "clob_market" {
+		if data, ok := raw["data"].(map[string]interface{}); ok {
+			// Extract more specific type from nested data if available
+			if dataType, ok := data["type"].(string); ok {
+				msgType = dataType
+			}
+			// Use the nested data as the primary raw map for parsing
+			raw = data
+		}
 	}
 
 	if msgType == "pong" {
